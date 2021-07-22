@@ -35,7 +35,7 @@ def get_geoms(row):
     """
     return pygeos.points(row.x,row.y)
 
-def reproject(df_ds,current_crs="epsg:3857",approximate_crs = "epsg:4326"):
+def reproject_assets(df_ds,current_crs="epsg:3857",approximate_crs = "epsg:4326"):
     """[summary]
 
     Args:
@@ -55,7 +55,7 @@ def reproject(df_ds,current_crs="epsg:3857",approximate_crs = "epsg:4326"):
     return pygeos.set_coordinates(geometries.copy(), np.array(new_coords).T) 
 
 
-def read_flood_as_dataframe(hazard_file):
+def load_flood_as_dataframe(hazard_file):
     """[summary]
 
     Args:
@@ -90,51 +90,7 @@ def rough_flood_extent(df_ds):
     return pygeos.convex_hull(pygeos.multipoints(df_ds['geometry'].values))
 
 
-def read_line_assets(osm_data_path,asset_type='railways',country='DEU'):
-    """[summary]
-
-    Args:
-        asset_type (str, optional): [description]. Defaults to 'railways'.
-        country (str, optional): [description]. Defaults to 'DEU'.
-
-    Returns:
-        [type]: [description]
-    """    
-    # load data
-    assets = pd.read_feather(os.path.join(osm_data_path,'{}_{}.feather'.format(country,asset_type)))
-    assets.geometry = assets.geometry.progress_apply(pygeos.from_wkb)
-    
-    # reproject
-    assets['geometry'] = reproject(assets,current_crs="epsg:4326",approximate_crs ="epsg:3857")
-    
-    # make STRtree
-    tree = pygeos.STRtree(assets.geometry.values)
-    
-    return assets,tree
-
-def read_point_assets(osm_data_path,asset_type='telecom',country='DEU'):
-    """[summary]
-
-    Args:
-        asset_type (str, optional): [description]. Defaults to 'telecom'.
-        country (str, optional): [description]. Defaults to 'DEU'.
-
-    Returns:
-        [type]: [description]
-    """    
-    # load data
-    assets = pd.read_feather(os.path.join(osm_data_path,'{}_{}.feather'.format(country,asset_type)))
-    assets.geometry = assets.geometry.progress_apply(pygeos.from_wkb)
-    
-    # reproject
-    assets['geometry'] = reproject(assets,current_crs="epsg:4326",approximate_crs ="epsg:3857")
-    
-    # make STRtree
-    tree = pygeos.STRtree(assets.geometry.values)
-    
-    return assets,tree
-
-def read_polygon_assets(osm_data_path,asset_type='airports',country='DEU'):
+def load_assets(osm_data_path,asset_type='airports',country='DEU',reproject=True):
     """[summary]
 
     Args:
@@ -146,10 +102,11 @@ def read_polygon_assets(osm_data_path,asset_type='airports',country='DEU'):
     """    
     # load data
     assets = pd.read_feather(os.path.join(osm_data_path,'{}_{}.feather'.format(country,asset_type)))
-    assets.geometry = assets.geometry.progress_apply(pygeos.from_wkb)
+    assets.geometry = pygeos.from_wkb(assets.geometry.values) #assets.geometry.progress_apply(pygeos.from_wkb)
     
     # reproject
-    assets['geometry'] = reproject(assets,current_crs="epsg:4326",approximate_crs ="epsg:3857")
+    if reproject:
+        assets['geometry'] = reproject_assets(assets,current_crs="epsg:4326",approximate_crs ="epsg:3857")
     
     # make STRtree
     tree = pygeos.STRtree(assets.geometry.values)
@@ -182,7 +139,7 @@ def buffer_assets(assets,buffer_size=100):
     Returns:
         [type]: [description]
     """    
-    assets['buffered'] = assets.geometry.progress_apply(lambda x: pygeos.buffer(x,buffer_size)) 
+    assets['buffered'] = pygeos.buffer(assets.geometry.values,buffer_size)# assets.geometry.progress_apply(lambda x: pygeos.buffer(x,buffer_size)) 
 
     return assets
 
@@ -220,7 +177,7 @@ def get_depth(row,flood_dict,get_flood_points):
     else:
         return 0
 
-def get_damage_per_asset(asset,df_ds,assets,grid_size=90):
+def get_damage_per_asset(asset,df_ds,assets,curves,maxdam,grid_size=90):
     """[summary]
 
     Args:
@@ -235,27 +192,59 @@ def get_damage_per_asset(asset,df_ds,assets,grid_size=90):
     get_flood_points = df_ds.iloc[asset[1]['flood_point'].values].reset_index()
     get_flood_points.geometry= pygeos.buffer(get_flood_points.geometry,radius=grid_size/2,cap_style='square').values
     get_flood_points = get_flood_points.loc[pygeos.intersects(get_flood_points.geometry.values,assets.iloc[asset[0]].geometry)]
-    
-    vthreshold = 0
-    vhalf = 0.5
-    maxdam = 1000
-    maxdam_asset = 100000
 
+    
+    asset_type = assets.iloc[asset[0]].asset
+    maxdam_asset = maxdam.loc[asset_type].MaxDam
+    
+    water_depths = curves[asset_type].index.values
+    fragility_values = curves[asset_type].values
+    
+    asset_geom = assets.iloc[asset[0]].geometry
+        
     if len(get_flood_points) == 0:
         return asset[0],0
     else:
         
-        if pygeos.get_type_id(assets.iloc[asset[0]].geometry) == 1:
-            get_flood_points['overlay_meters'] = get_flood_points.apply(lambda row: pygeos.length(pygeos.intersection(row.geometry,assets.iloc[asset[0]].geometry)),axis=1) 
-            return asset[0],get_flood_points.apply(lambda x: get_fragility(x.Xaver,vthreshold,vhalf)*maxdam*x.overlay_meters,axis=1).sum()            
-        elif  pygeos.get_type_id(assets.iloc[asset[0]].geometry) == 3:
-            get_flood_points['overlay_m2'] = get_flood_points.apply(lambda row: pygeos.area(pygeos.intersection(row.geometry,assets.iloc[asset[0]].geometry)),axis=1) 
-            return asset[0],get_flood_points.apply(lambda x: get_fragility(x.Xaver,vthreshold,vhalf)*maxdam*x.overlay_m2,axis=1).sum()          
+        if pygeos.get_type_id(asset_geom) == 1:
+            get_flood_points['overlay_meters'] = pygeos.length(pygeos.intersection(get_flood_points.geometry.values,asset_geom))
+            
+            return asset[0],np.sum((np.interp(get_flood_points.hazard_intensity.values*100,water_depths,fragility_values))*get_flood_points.overlay_meters*maxdam_asset)
+        
+        elif  pygeos.get_type_id(asset_geom) == 3:
+            get_flood_points['overlay_m2'] = pygeos.area(pygeos.intersection(get_flood_points.geometry.values,asset_geom))
+            
+            return asset[0],get_flood_points.apply(lambda x: np.interp(x.hazard_intensity*100, water_depths, fragility_values)*maxdam_asset*x.overlay_m2,axis=1).sum()     
+        
         else:
-            return asset[0],get_flood_points.apply(lambda x: get_fragility(x.Xaver,vthreshold,vhalf)*maxdam_asset,axis=1).sum()          
+            return asset[0],np.sum((np.interp(get_flood_points.hazard_intensity.values*100,water_depths,fragility_values))*maxdam_asset)     
+
+def load_curves_maxdam(data_path): 
+    """[summary]
+
+    Args:
+        data_path ([type]): [description]
+
+    Returns:
+        [type]: [description]
+    """
+    curves = pd.read_excel(data_path,sheet_name='flooding_curves',skiprows=8,index_col=[0])
+    maxdam=pd.read_excel(data_path,sheet_name='flooding_curves',index_col=[0]).iloc[:5]
+    curves.columns = maxdam.columns
+    maxdam = maxdam.T
+    curves = curves.interpolate()
+    maxdam.MaxDam = maxdam.MaxDam.fillna(1000)
+    
+    return curves,maxdam
 
 def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood'):
+    """[summary]
 
+    Args:
+        asset_type (str, optional): [description]. Defaults to 'railways'.
+        country (str, optional): [description]. Defaults to 'DEU'.
+        hazard_type (str, optional): [description]. Defaults to 'flood'.
+    """
 
     source_path = os.path.join("C:\Dropbox","VU","Projects","RECEIPT","receipt_storylines")
     osm_data_path = os.path.join(source_path,'osm_data')
@@ -264,24 +253,33 @@ def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood'):
     tqdm.pandas()
 
     # load hazard file
-    hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
-    df_ds = read_flood_as_dataframe(hazard_file)
+    if country == 'DEU':
+        hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
+    elif country == 'FRA':
+        hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
+    elif country == 'ITA':
+        hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
+
+    df_ds = load_flood_as_dataframe(hazard_file)
     convex_hull_hazard = rough_flood_extent(df_ds)
+
+    # load curves and maxdam
+    curves,maxdam = load_curves_maxdam(data_path='C:\Projects\gmhcira\data\infra_vulnerability_data.xlsx')
 
     if asset_type in ['railways','roads']:
         ### get line assets, clip and buffer them
-        assets,tree = read_line_assets(osm_data_path,asset_type,country)
+        assets,tree = load_assets(osm_data_path,asset_type,country)
         assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
         assets = buffer_assets(assets,buffer_size=100)
     
     elif asset_type in ['airports']:
     ### get poly assets, clip and buffer them
-        assets,tree = read_polygon_assets(osm_data_path,asset_type,country)
+        assets,tree = load_assets(osm_data_path,asset_type,country)
         assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
         
     elif asset_type in ['telecom']:
     ### get point assets, clip and buffer them
-        assets,tree = read_point_assets(osm_data_path,asset_type,country)
+        assets,tree = load_assets(osm_data_path,asset_type,country)
         assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
         assets = buffer_assets(assets,buffer_size=100)
 
@@ -291,7 +289,7 @@ def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood'):
     ### estimate damage
     collect_damages = []
     for asset in tqdm(flood_overlay.groupby('asset'),total=len(flood_overlay.asset.unique())):
-        collect_damages.append(get_damage_per_asset(asset,df_ds,assets))
+        collect_damages.append(get_damage_per_asset(asset,df_ds,assets,curves,maxdam))
         
     damaged_assets = assets.merge(pd.DataFrame(collect_damages,columns=['index','damage']),left_index=True,right_on='index')
 
