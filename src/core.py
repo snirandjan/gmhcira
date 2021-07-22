@@ -250,11 +250,19 @@ def load_curves_maxdam(data_path):
     Returns:
         [type]: [description]
     """
+    # load curves and maximum damages as separate inputs
     curves = pd.read_excel(data_path,sheet_name='flooding_curves',skiprows=8,index_col=[0])
     maxdam=pd.read_excel(data_path,sheet_name='flooding_curves',index_col=[0]).iloc[:5]
+    
     curves.columns = maxdam.columns
+
+    #transpose maxdam so its easier work with the dataframe
     maxdam = maxdam.T
+
+    #interpolate the curves to fill missing values
     curves = curves.interpolate()
+
+    # fill maxdam damages when value is unknown ### THIS SHOULD BE REMOVED WHEN ALL VALUES ARE KNOWN
     maxdam.MaxDam = maxdam.MaxDam.fillna(1000)
     
     return curves,maxdam
@@ -289,43 +297,71 @@ def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood',**
     convex_hull_hazard = rough_flood_extent(df_ds)
 
     # load curves and maxdam
-    curves,maxdam = load_curves_maxdam(data_path='C:\Projects\gmhcira\data\infra_vulnerability_data.xlsx')
+    curves,maxdam = load_curves_maxdam(data_path=os.path.join('..','data','infra_vulnerability_data.xlsx'))
 
-    point_assets = ['power','health','telecom']
-    polygon_assets = ['power','airports','educational_facilities','waste_solid','waste_water','water_supply']
-    line_assets = ['power','railways','roads']
+    point_assets = ['health','telecom']
+    polygon_assets = ['airports','educational_facilities','waste_solid','waste_water','water_supply']
+    line_assets = ['railways','roads']
 
-    if asset_type in line_assets:
+    assets,tree = load_assets(osm_data_path,asset_type,country)
+    assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
+
+    if (asset_type in line_assets) | (asset_type in point_assets):
         ### get line assets, clip and buffer them
-        assets,tree = load_assets(osm_data_path,asset_type,country)
-        assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
         assets = buffer_assets(assets,buffer_size=100)
     
-    elif asset_type in polygon_assets:
-    ### get poly assets, clip and buffer them
-        assets,tree = load_assets(osm_data_path,asset_type,country)
-        assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
-        
-    elif asset_type in point_assets:
-    ### get point assets, clip and buffer them
-        assets,tree = load_assets(osm_data_path,asset_type,country)
-        assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
-        assets = buffer_assets(assets,buffer_size=100)
+    elif asset_type == 'power':
+        power_lines = buffer_assets(assets.loc[assets.asset.isin(['cable','minor_cable','line','minor_line'])],buffer_size=100).reset_index(drop=True)
+        power_poly = assets.loc[assets.asset.isin(['plant','substation'])].reset_index(drop=True)
+        power_points = buffer_assets(assets.loc[assets.asset.isin(['power_tower','power_pole'])],buffer_size=100).reset_index(drop=True)
 
     print('Asset data loaded for {} in {}'.format(asset_type,country))
 
-   # get STRtree for flood
-    flood_overlay = pd.DataFrame(overlay_hazard_assets(df_ds,assets).T,columns=['asset','flood_point'])
+    if asset_type != 'power':
+        # get STRtree for flood
+        flood_overlay = pd.DataFrame(overlay_hazard_assets(df_ds,assets).T,columns=['asset','flood_point'])
 
-    ### estimate damage
-    collect_damages = []
-    for asset in tqdm(flood_overlay.groupby('asset'),total=len(flood_overlay.asset.unique()),desc='{} in {} damage calculation'.format(asset_type,country)):
-        collect_damages.append(get_damage_per_asset(asset,df_ds,assets,curves,maxdam))
+        ### estimate damage
+        collect_damages = []
+        for asset in tqdm(flood_overlay.groupby('asset'),total=len(flood_overlay.asset.unique()),desc='{} in {} damage calculation'.format(asset_type,country)):
+            collect_damages.append(get_damage_per_asset(asset,df_ds,assets,curves,maxdam))
+
+        damaged_assets = assets.merge(pd.DataFrame(collect_damages,columns=['index','damage']),left_index=True,right_on='index')
+
+        if (asset_type in line_assets) | (asset_type in point_assets):
+            damaged_assets = damaged_assets.drop(['buffered'],axis=1) 
+
+    else:
+        # lines
+        flood_overlay_lines = pd.DataFrame(overlay_hazard_assets(df_ds,power_lines).T,columns=['asset','flood_point'])
+  
+        collect_line_damages = []
+        for asset in tqdm(flood_overlay_lines.groupby('asset'),total=len(flood_overlay_lines.asset.unique()),desc='{} lines in {} damage calculation'.format(asset_type,country)):
+            collect_line_damages.append(get_damage_per_asset(asset,df_ds,power_lines,curves,maxdam))
+
+        damaged_lines = power_lines.merge(pd.DataFrame(collect_line_damages,columns=['index','damage']),left_index=True,right_on='index')
+        damaged_lines = damaged_lines.drop(['buffered'],axis=1) 
+
+        # polygons
+        flood_overlay_poly = pd.DataFrame(overlay_hazard_assets(df_ds,power_poly).T,columns=['asset','flood_point'])
+  
+        collect_poly_damages = []
+        for asset in tqdm(flood_overlay_poly.groupby('asset'),total=len(flood_overlay_poly.asset.unique()),desc='{} poly in {} damage calculation'.format(asset_type,country)):
+            collect_poly_damages.append(get_damage_per_asset(asset,df_ds,power_poly,curves,maxdam))
         
-    damaged_assets = assets.merge(pd.DataFrame(collect_damages,columns=['index','damage']),left_index=True,right_on='index')
+        damaged_poly = assets.merge(pd.DataFrame(collect_poly_damages,columns=['index','damage']),left_index=True,right_on='index')
 
-    if (asset_type in line_assets) | (asset_type in point_assets):
-        damaged_assets = damaged_assets.drop(['buffered'],axis=1) 
+        # points
+        flood_overlay_points = pd.DataFrame(overlay_hazard_assets(df_ds,power_points).T,columns=['asset','flood_point'])
+  
+        collect_point_damages = []
+        for asset in tqdm(flood_overlay_points.groupby('asset'),total=len(flood_overlay_points.asset.unique()),desc='{} point in {} damage calculation'.format(asset_type,country)):
+            collect_point_damages.append(get_damage_per_asset(asset,df_ds,power_points,curves,maxdam))
+        
+        damaged_points = power_points.merge(pd.DataFrame(collect_point_damages,columns=['index','damage']),left_index=True,right_on='index')
+        damaged_points = damaged_points.drop(['buffered'],axis=1) 
+
+        damaged_assets = pd.concat([damaged_lines,damaged_poly,damaged_points]).reset_index(drop=True)
 
     damaged_assets.to_csv(os.path.join(source_path,'damage_data','{}_{}.csv'.format(asset_type,country)))
 
@@ -346,7 +382,6 @@ def event_assessment(event='Xaver',parallel=True):
         hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
 
     all_assets = ['airports','education_facilities','health','power','railways','roads','telecom','waste_solid','waste_water','water_supply']
-    #all_assets = ['airports','telecom']
 
     if parallel:
         with Pool(cpu_count()-2) as pool: 
@@ -364,10 +399,12 @@ def event_assessment(event='Xaver',parallel=True):
     for asset in out:
         get_total_damages.append(pd.DataFrame(asset.groupby(by='asset').sum()['damage']).reset_index())
 
-    return pd.concat(get_total_damages)
+    df_total_damages = pd.concat(get_total_damages)
+    df_total_damages.to_csv(os.path.join(source_path,'damage_data','total_damage_{}.csv'.format(event)))
+
+    return df_total_damages
 
 if __name__ == "__main__":
 
-    event_damage_per_asset = (event_assessment(event='Xaver',parallel=True))
-
+    event_damage_per_asset = (event_assessment(event='Xynthia',parallel=False))
     print(event_damage_per_asset)
