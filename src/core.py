@@ -106,8 +106,11 @@ def load_assets(osm_data_path,asset_type='airports',country='DEU',reproject=True
     
     # reproject
     if reproject:
-        assets['geometry'] = reproject_assets(assets,current_crs="epsg:4326",approximate_crs ="epsg:3857")
-    
+        if country in ['FRA','DEU']:
+            assets['geometry'] = reproject_assets(assets,current_crs="epsg:4326",approximate_crs ="epsg:3857")
+        else:
+            assets['geometry'] = reproject_assets(assets,current_crs="epsg:4326",approximate_crs ="epsg:5659")
+
     # make STRtree
     tree = pygeos.STRtree(assets.geometry.values)
     
@@ -297,6 +300,6 @@ def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood'):
 
 if __name__ == "__main__":
 
-    out = damage_assessment(asset_type='telecom',country='DEU',hazard_type='flood')
+    out = damage_assessment(asset_type='telecom',country='FRA',hazard_type='flood')
 
     print(out)
