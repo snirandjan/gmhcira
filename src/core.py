@@ -9,6 +9,16 @@ import dask.dataframe as dd
 from dask.multiprocessing import get
 from dask.diagnostics import ProgressBar
 import pyproj
+from multiprocessing import Pool,cpu_count
+from functools import partial
+
+def paths():
+
+    source_path = os.path.join("C:\Dropbox","VU","Projects","RECEIPT","receipt_storylines")
+    osm_data_path = os.path.join(source_path,'osm_data')
+    hazard_data_path = os.path.join(source_path,'hazard_data')
+
+    return source_path,osm_data_path,hazard_data_path
 
 def get_fragility(v,vthreshold,vhalf):
     """[summary]
@@ -55,7 +65,7 @@ def reproject_assets(df_ds,current_crs="epsg:3857",approximate_crs = "epsg:4326"
     return pygeos.set_coordinates(geometries.copy(), np.array(new_coords).T) 
 
 
-def load_flood_as_dataframe(hazard_file):
+def load_flood_as_dataframe(hazard_file,country='DEU'):
     """[summary]
 
     Args:
@@ -65,18 +75,27 @@ def load_flood_as_dataframe(hazard_file):
         [type]: [description]
     """    
     with xr.open_rasterio(hazard_file) as ds:
-        df_ds = ds.to_dataframe(name='Xaver').reset_index()
-        df_ds = df_ds.loc[(df_ds.Xaver != -9999) & (df_ds.Xaver != 0)]
-        df_ds.reset_index(inplace=True,drop=True)
 
-        ddata = dd.from_pandas(df_ds, npartitions=32)
+        if country == 'DEU':
+            df_ds = ds.to_dataframe(name='Xaver').reset_index()
+            df_ds = df_ds.rename(columns={'Xaver': 'hazard_intensity'})
+        elif country == 'FRA':
+            df_ds = ds.to_dataframe(name='Xynthia').reset_index()
+            df_ds = df_ds.rename(columns={'Xynthia': 'hazard_intensity'})
+        elif country == 'ITA':
+            df_ds = ds.to_dataframe(name='Xaver').reset_index()
+            df_ds = df_ds.rename(columns={'Xaver': 'hazard_intensity'})                
 
-        with ProgressBar():
-            df_ds['geometry'] = ddata.map_partitions(lambda df_ds: df_ds.apply((lambda row: get_geoms(row)),axis=1),meta=('object')).compute(scheduler='processes') 
+        df_ds = df_ds.loc[(df_ds.hazard_intensity != -9999) & (df_ds.hazard_intensity != 0)].reset_index(drop=True)
+        df_ds['geometry'] = pygeos.points(df_ds.x,y=df_ds.y)
 
-        #df_ds['geometry'] = reproject(df_ds,current_crs="epsg:3857",approximate_crs = "epsg:4326")
-        
     return df_ds
+
+#         ddata = dd.from_pandas(df_ds, npartitions=32)
+
+#         with ProgressBar():
+#             df_ds['geometry'] = ddata.map_partitions(lambda df_ds: df_ds.apply((lambda row: get_geoms(row)),axis=1),meta=('object')).compute(scheduler='processes') 
+       
 
 def rough_flood_extent(df_ds):
     """[summary]
@@ -240,7 +259,7 @@ def load_curves_maxdam(data_path):
     
     return curves,maxdam
 
-def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood'):
+def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood',**kwargs):
     """[summary]
 
     Args:
@@ -249,57 +268,106 @@ def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood'):
         hazard_type (str, optional): [description]. Defaults to 'flood'.
     """
 
-    source_path = os.path.join("C:\Dropbox","VU","Projects","RECEIPT","receipt_storylines")
-    osm_data_path = os.path.join(source_path,'osm_data')
-    hazard_data_path = os.path.join(source_path,'hazard_data')
+    source_path,osm_data_path,hazard_data_path = paths()
 
-    tqdm.pandas()
+    print('Damage Assessment for {} started in {}'.format(asset_type,country))
 
-    # load hazard file
-    if country == 'DEU':
-        hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
-    elif country == 'FRA':
-        hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
-    elif country == 'ITA':
-        hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
+    if 'hazard' in kwargs:
+         df_ds = kwargs['hazard']
+    else:
+        # load hazard file
+        if country == 'DEU':
+            hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
+        elif country == 'FRA':
+            hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
+        elif country == 'ITA':
+            hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
 
-    df_ds = load_flood_as_dataframe(hazard_file)
+        df_ds = load_flood_as_dataframe(hazard_file)
+        print('Hazard data loaded for {} in {}'.format(asset_type,country))
+
     convex_hull_hazard = rough_flood_extent(df_ds)
 
     # load curves and maxdam
     curves,maxdam = load_curves_maxdam(data_path='C:\Projects\gmhcira\data\infra_vulnerability_data.xlsx')
 
-    if asset_type in ['railways','roads']:
+    point_assets = ['power','health','telecom']
+    polygon_assets = ['power','airports','educational_facilities','waste_solid','waste_water','water_supply']
+    line_assets = ['power','railways','roads']
+
+    if asset_type in line_assets:
         ### get line assets, clip and buffer them
         assets,tree = load_assets(osm_data_path,asset_type,country)
         assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
         assets = buffer_assets(assets,buffer_size=100)
     
-    elif asset_type in ['airports']:
+    elif asset_type in polygon_assets:
     ### get poly assets, clip and buffer them
         assets,tree = load_assets(osm_data_path,asset_type,country)
         assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
         
-    elif asset_type in ['telecom']:
+    elif asset_type in point_assets:
     ### get point assets, clip and buffer them
         assets,tree = load_assets(osm_data_path,asset_type,country)
         assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
         assets = buffer_assets(assets,buffer_size=100)
+
+    print('Asset data loaded for {} in {}'.format(asset_type,country))
 
    # get STRtree for flood
     flood_overlay = pd.DataFrame(overlay_hazard_assets(df_ds,assets).T,columns=['asset','flood_point'])
 
     ### estimate damage
     collect_damages = []
-    for asset in tqdm(flood_overlay.groupby('asset'),total=len(flood_overlay.asset.unique())):
+    for asset in tqdm(flood_overlay.groupby('asset'),total=len(flood_overlay.asset.unique()),desc='{} in {} damage calculation'.format(asset_type,country)):
         collect_damages.append(get_damage_per_asset(asset,df_ds,assets,curves,maxdam))
         
     damaged_assets = assets.merge(pd.DataFrame(collect_damages,columns=['index','damage']),left_index=True,right_on='index')
 
+    if (asset_type in line_assets) | (asset_type in point_assets):
+        damaged_assets = damaged_assets.drop(['buffered'],axis=1) 
+
+    damaged_assets.to_csv(os.path.join(source_path,'damage_data','{}_{}.csv'.format(asset_type,country)))
+
     return damaged_assets
+
+def event_assessment(event='Xaver',parallel=True):
+
+    source_path,osm_data_path,hazard_data_path = paths()
+
+    if event == 'Xaver':
+        country = 'DEU'
+        hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
+    elif event == 'Xynthia':
+        country = 'FRA'
+        hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
+    elif event == 'EmiliaRomagna':
+        country = 'ITA'
+        hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
+
+    all_assets = ['airports','education_facilities','health','power','railways','roads','telecom','waste_solid','waste_water','water_supply']
+    #all_assets = ['airports','telecom']
+
+    if parallel:
+        with Pool(cpu_count()-2) as pool: 
+            out = pool.map(partial(damage_assessment, country=country), all_assets)
+    else:
+
+        df_ds = load_flood_as_dataframe(hazard_file)
+
+        out = []
+        for asset_type in all_assets:
+            out.append(damage_assessment(asset_type=asset_type,country=country,hazard_type='flood',hazard=df_ds))
+
+    # collect total damage per asset and return that
+    get_total_damages = []
+    for asset in out:
+        get_total_damages.append(pd.DataFrame(asset.groupby(by='asset').sum()['damage']).reset_index())
+
+    return pd.concat(get_total_damages)
 
 if __name__ == "__main__":
 
-    out = damage_assessment(asset_type='telecom',country='FRA',hazard_type='flood')
+    event_damage_per_asset = (event_assessment(event='Xaver',parallel=True))
 
-    print(out)
+    print(event_damage_per_asset)
