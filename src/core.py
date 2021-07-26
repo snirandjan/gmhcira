@@ -5,10 +5,13 @@ import geopandas as gpd
 import xarray as xr
 import pygeos
 from tqdm import tqdm
-import dask.dataframe as dd
-from dask.multiprocessing import get
-from dask.diagnostics import ProgressBar
 import pyproj
+import geopandas as gpd
+import rasterio
+import rasterio.mask
+from rasterio.mask import mask
+from rasterio.features import shapes
+from shapely.geometry import mapping
 from multiprocessing import Pool,cpu_count
 from functools import partial
 
@@ -64,6 +67,43 @@ def reproject_assets(df_ds,current_crs="epsg:3857",approximate_crs = "epsg:4326"
     
     return pygeos.set_coordinates(geometries.copy(), np.array(new_coords).T) 
 
+def clip_hazard_maps():
+
+    source_path,osm_data_path,hazard_data_path = paths()
+
+    region_data_path = os.path.join(source_path,'region_data')
+
+    for event in ['Xaver','Xynthia','EmiliaRomagna']:
+  
+        nuts2_regions = gpd.read_file(os.path.join(region_data_path,'exposed_nuts2.shp'))
+        
+        if event in ['Xaver','Xynthia']:
+            nuts2_regions = nuts2_regions.to_crs(epsg=3857)
+        else:
+            nuts2_regions = nuts2_regions.to_crs(epsg=5659)
+
+        event_nuts = nuts2_regions.loc[nuts2_regions.event==event].dissolve().buffer(10000)
+        geoms = [mapping(event_nuts.geometry.iloc[0])]
+
+        if event == 'Xaver':
+            hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
+        elif event == 'Xynthia':
+            hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
+        elif event == 'EmiliaRomagna':
+            hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
+
+        with rasterio.open(hazard_file) as src:
+            out_image, out_transform = rasterio.mask.mask(src, geoms , crop=True)
+            out_meta = src.meta
+
+        out_meta.update({"driver": "GTiff",
+                        "height": out_image.shape[1],
+                        "width": out_image.shape[2],
+                        "transform": out_transform,
+                        "compress": "LZW"})
+
+        with rasterio.open(os.path.join(hazard_data_path,'events',"{}.tif".format(event)), "w", **out_meta) as dest:
+            dest.write(out_image)     
 
 def load_flood_as_dataframe(hazard_file,country='DEU'):
     """[summary]
@@ -106,7 +146,7 @@ def rough_flood_extent(df_ds):
     Returns:
         [type]: [description]
     """
-    return pygeos.convex_hull(pygeos.multipoints(df_ds['geometry'].values))
+    return pygeos.envelope(pygeos.multipoints(df_ds['geometry'].values))
 
 
 def load_assets(osm_data_path,asset_type='airports',country='DEU',reproject=True):
@@ -177,7 +217,7 @@ def overlay_hazard_assets(df_ds,assets):
     """
     #overlay 
     flooded_tree = pygeos.STRtree(df_ds.geometry.values)
-    if pygeos.get_type_id(assets.iloc[0].geometry) == 3:
+    if (pygeos.get_type_id(assets.iloc[0].geometry) == 3) | (pygeos.get_type_id(assets.iloc[0].geometry) == 6):
         return  flooded_tree.query_bulk(assets.geometry,predicate='intersects')    
     else:
         return  flooded_tree.query_bulk(assets.buffered,predicate='intersects')
@@ -285,11 +325,11 @@ def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood',**
     else:
         # load hazard file
         if country == 'DEU':
-            hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
+            hazard_file = os.path.join(hazard_data_path,'events','Xaver.tif')
         elif country == 'FRA':
-            hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
+            hazard_file = os.path.join(hazard_data_path,'events','Xynthia.tif')
         elif country == 'ITA':
-            hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
+            hazard_file = os.path.join(hazard_data_path,'events','EmiliaRomagna.tif')
 
         df_ds = load_flood_as_dataframe(hazard_file)
         print('Hazard data loaded for {} in {}'.format(asset_type,country))
@@ -406,5 +446,5 @@ def event_assessment(event='Xaver',parallel=True):
 
 if __name__ == "__main__":
 
-    event_damage_per_asset = (event_assessment(event='Xynthia',parallel=False))
+    event_damage_per_asset = (event_assessment(event='EmiliaRomagna',parallel=True))
     print(event_damage_per_asset)
