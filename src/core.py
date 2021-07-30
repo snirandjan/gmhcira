@@ -446,5 +446,5 @@ def event_assessment(event='Xaver',parallel=True):
 
 if __name__ == "__main__":
 
-    event_damage_per_asset = (event_assessment(event='EmiliaRomagna',parallel=True))
+    event_damage_per_asset = (event_assessment(event='EmiliaRomagna',parallel=False))
     print(event_damage_per_asset)
