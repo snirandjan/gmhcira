@@ -466,7 +466,7 @@ def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood',**
         
         damaged_points = power_points.merge(pd.DataFrame(collect_point_damages,columns=['index','damage']),left_index=True,right_on='index')
         damaged_points = damaged_points.drop(['buffered'],axis=1) 
-        gpd.GeoDataFrame(damaged_points.copy()).to_file(os.path.join(osm_data_path,'..','damage_data','{}_{}_poly.shp'.format(country,asset_type)))
+        gpd.GeoDataFrame(damaged_points.copy()).to_file(os.path.join(osm_data_path,'..','damage_data','{}_{}_point.shp'.format(country,asset_type)))
      
         # merge them
         damaged_assets = pd.concat([damaged_lines,damaged_poly,damaged_points]).reset_index(drop=True)
