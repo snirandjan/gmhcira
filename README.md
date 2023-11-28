@@ -1,4 +1,5 @@
-# Coastal Infrastructure exposure and vulnerability analysis
+# Global multi-hazard critical infrastructure risk analysis
+
 
 Python implementation of global multi-hazard critical infrastructure risk analysis
 
