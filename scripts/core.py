@@ -1,450 +1,303 @@
+"""
+  
+@Author: Sadhana Nirandjan & Elco Koks  - Institute for Environmental studies, VU University Amsterdam
+"""
+
+################################################################
+                ## Load package and set path ##
+################################################################
 import os,sys
-import numpy as np
 import pandas as pd
-import geopandas as gpd
-import xarray as xr
-import pygeos
-from tqdm import tqdm
-import pyproj
+import numpy as np
 import geopandas as gpd
 import rasterio
-import rasterio.mask
-from rasterio.mask import mask
-from rasterio.features import shapes
-from shapely.geometry import mapping
+import rioxarray as rxr
+import xarray as xr
+#!pip install geopy
+#!pip install boltons
+from pathlib import Path
+from geofeather.pygeos import to_geofeather, from_geofeather
+from tqdm import tqdm
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from rasterio.plot import show
+from IPython.display import display #when printing geodataframes, put it in columns -> use display(df)
+from matplotlib.ticker import (MultipleLocator, FormatStrFormatter,
+                               AutoMinorLocator, LinearLocator, MaxNLocator)
 from multiprocessing import Pool,cpu_count
-from functools import partial
+from itertools import repeat
+import pygeos
+from pgpkg import Geopackage
+import matplotlib.pyplot as plt
+import copy
 
-def paths():
+#sys.path.append(os.path.join('..','scripts')) # path to our python scripts
+#sys.path.append("C:\Projects\gmhcira\scripts")
+import functions
+import preprocessing_hazard
 
-    source_path = os.path.join("C:\Dropbox","VU","Projects","RECEIPT","receipt_storylines")
-    osm_data_path = os.path.join(source_path,'osm_data')
-    hazard_data_path = os.path.join(source_path,'hazard_data')
+plt.rcParams['figure.figsize'] = [20, 20]
 
-    return source_path,osm_data_path,hazard_data_path
+from osgeo import gdal
+gdal.SetConfigOption("OSM_CONFIG_FILE", os.path.join("..","osmconf.ini"))
 
-def get_fragility(v,vthreshold,vhalf):
-    """[summary]
-
+#def run_all(goal_area = 'Netherlands', local_path = 'C:/Users/snn490/surfdrive'):
+def run_all(countries, goal_area = 'Global', local_path = os.path.join('/scistor','ivm','snn490')):
+    """Function to manage and run the model (in parts). 
     Args:
-        v ([type]): [description]
-        vthreshold ([type]): [description]
-        vhalf ([type]): [description]
-
-    Returns:
-        [type]: [description]
+        *areas* ([str]): list with areas (e.g. list of countries)
+        *goal_area* (str, optional): area that will be analyzed. Defaults to "Global". 
+        *local_path* ([str], optional): Local pathway. Defaults to os.path.join('/scistor','ivm','snn490').
     """    
-    vn = max(v-vthreshold,0)/(vhalf-vthreshold)
-    return np.power(vn,3)/(1+np.power(vn,3))
 
-def get_geoms(row):
-    """[summary]
+    hazard_preprocessing(local_path)
+    #base_calculations(local_path) 
+    #base_calculations_global(local_path) #if base calcs per area already exist
+    #cisi_calculation(local_path,goal_area)
 
-    Args:
-        row ([type]): [description]
 
+
+################################################################
+                    ## set variables ##
+################################################################
+
+def set_variables():
+    """Function to set the variables that are necessary as input to the model
     Returns:
-        [type]: [description]
+        hazard_dct (dictionary): overview of hazards and return periods 
+    """    
+    #hazard_dct = {'coastal_flooding': [2, 5, 10, 25, 50, 100, 250, 500, 1000], 
+    #              'fluvial_flooding': [5, 10, 20, 50, 75, 100, 200, 250, 500, 1000], 
+    #              'earthquakes': [250, 475, 975, 1500, 2475], 
+    #              'tropical_cyclones': [10, 20 , 50, 100, 200, 1000, 2000, 5000, 10000], 
+    #              'landslides': [None]} #keys are hazards, lists are return periods associated with hazard
+
+    hazard_dct = {'coastal_flooding': [2, 5, 10, 25, 50, 100, 250, 500, 1000]} #keys are hazards, lists are return periods associated with hazard
+
+    return [hazard_dct]
+
+################################################################
+                    ## Set pathways ##
+################################################################
+
+def set_paths(local_path = 'C:/Data/CISI',hazard_preprocessing=False):
+    """Function to specify required pathways for inputs and outputs
+    Args:
+        *local_path* (str, optional): local path. Defaults to 'C:/Data/CISI'.
+        *hazard_preprocessing* (bool, optional): True if hazard preprocessing part of model should be activated. Defaults to False.
+    Returns:
+        *hazard_data_path* (str): directory to coastal flood, landslide, earthquake and cyclone hazard data
+        *fathom_data_path* (str): directory to fathom hazard data
+        *country_shapefile_path* (str): directory to file with country boundaries
+    """ 
+    # Set path to inputdata
+    hazard_data_path = os.path.abspath(os.path.join('/scistor','ivm','data_catalogue','open_street_map','global_hazards'))
+    fathom_data_path = os.path.abspath(os.path.join('/scistor','ivm','eks510','fathom-global'))
+
+    shapes_file = 'global_countries_advanced.geofeather'
+    country_shapefile_path = os.path.abspath(os.path.join(local_path, 'Datasets', 'Administrative_boundaries', 'global_countries_buffer', shapes_file))
+
+    if hazard_preprocessing:
+        return [hazard_data_path,fathom_data_path,country_shapefile_path]
+
+################################################################
+ ## Step 1: hazard_preprocessing  ##
+################################################################    
+
+def hazard_preprocessing_per_area(country,hazard_dct,hazard_data_path,country_shapefile_path,hazard_type,file_path_lst,file_path):
+    """function to extract infrastrastructure for an area 
+    Args:
+        *area* (str): area to be analyzed
+        *osm_data_path* (str): directory to osm data
+        *fetched_infra_path* (str): directory to output location of the extracted infrastructure data 
+        *country_shapes_path* (str): directory to dataset with administrative boundaries (e.g. of countries)
     """
-    return pygeos.points(row.x,row.y)
+    shape_countries = from_geofeather(country_shapefile_path) #open as geofeather
+    hazard_df = from_geofeather(file_path.replace('tif', 'feather')) #open as geofeather
+    rp = str(hazard_dct[hazard_type][file_path_lst.index(file_path)]) #get return period using index
 
-def reproject_assets(df_ds,current_crs="epsg:3857",approximate_crs = "epsg:4326"):
-    """[summary]
+    if hazard_type in ['coastal_flooding', 'earthquakes']:
+        if os.path.isfile(os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp), '{}_rp{}_{}.feather'.format(hazard_type, rp, country))) == False: #if feather file does not already exists 
+            #soft overlay of hazard data with countries
+            country_shape = shape_countries[shape_countries['ISO_3digit'] == country]
+            if country_shape.empty == False: #if ISO_3digit in shape_countries
+                print("Time to overlay and output '{}' hazard data for the following country: {}".format(hazard_type, country))
+                spat_tree = pygeos.STRtree(hazard_df.geometry)
+                hazard_country_df = (hazard_df.loc[spat_tree.query(country_shape.geometry.iloc[0],predicate='intersects').tolist()]).sort_index(ascending=True) #get grids that overlap with country
+                hazard_country_df = hazard_country_df.reset_index() #.rename(columns = {'index':'grid_number'}) #get index as column and name column grid_number
 
-    Args:
-        df_ds ([type]): [description]
-        current_crs (str, optional): [description]. Defaults to "epsg:3857".
-        approximate_crs (str, optional): [description]. Defaults to "epsg:4326".
-
-    Returns:
-        [type]: [description]
-    """    
-
-    geometries = df_ds['geometry']
-    coords = pygeos.get_coordinates(geometries)
-    transformer=pyproj.Transformer.from_crs(current_crs, approximate_crs,always_xy=True)
-    new_coords = transformer.transform(coords[:, 0], coords[:, 1])
-    
-    return pygeos.set_coordinates(geometries.copy(), np.array(new_coords).T) 
-
-def clip_hazard_maps():
-
-    source_path,osm_data_path,hazard_data_path = paths()
-
-    region_data_path = os.path.join(source_path,'region_data')
-
-    for event in ['Xaver','Xynthia','EmiliaRomagna']:
-  
-        nuts2_regions = gpd.read_file(os.path.join(region_data_path,'exposed_nuts2.shp'))
-        
-        if event in ['Xaver','Xynthia']:
-            nuts2_regions = nuts2_regions.to_crs(epsg=3857)
+                #save data
+                Path(os.path.abspath(os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp)))).mkdir(parents=True, exist_ok=True) 
+                to_geofeather(hazard_country_df, os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp), '{}_rp{}_{}.feather'.format(hazard_type, rp, country)), crs="EPSG:4326") #save as geofeather #save file for each country
+                #to_geofeather(hazard_country_df, os.path.join(hazard_data_path, hazard_type, rp, '{}_{}_{}.feather'.format(hazard_type, rp, country)), crs="EPSG:4326") #save as geofeather #save file for each country
+                temp_df = functions.transform_to_gpd(hazard_country_df) #transform df to gpd with shapely geometries
+                temp_df.to_file(os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp), '{}_rp{}_{}.gpkg'.format(hazard_type, rp, country)), layer=' ', driver="GPKG")              
+            else:
+                print("Country '{}' not specified in file containing shapefiles of countries with ISO_3digit codes. Please check inconsistency".format(country))
         else:
-            nuts2_regions = nuts2_regions.to_crs(epsg=5659)
+            print('Hazard data already exists at country level, file: {}_rp{}_{}'.format(hazard_type,rp,country))
 
-        event_nuts = nuts2_regions.loc[nuts2_regions.event==event].dissolve().buffer(10000)
-        geoms = [mapping(event_nuts.geometry.iloc[0])]
-
-        if event == 'Xaver':
-            hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
-        elif event == 'Xynthia':
-            hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
-        elif event == 'EmiliaRomagna':
-            hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
-
-        with rasterio.open(hazard_file) as src:
-            out_image, out_transform = rasterio.mask.mask(src, geoms , crop=True)
-            out_meta = src.meta
-
-        out_meta.update({"driver": "GTiff",
-                        "height": out_image.shape[1],
-                        "width": out_image.shape[2],
-                        "transform": out_transform,
-                        "compress": "LZW"})
-
-        with rasterio.open(os.path.join(hazard_data_path,'events',"{}.tif".format(event)), "w", **out_meta) as dest:
-            dest.write(out_image)     
-
-def load_flood_as_dataframe(hazard_file,country='DEU'):
-    """[summary]
-
-    Args:
-        hazard_file ([type]): [description]
-
-    Returns:
-        [type]: [description]
-    """    
-    with xr.open_rasterio(hazard_file) as ds:
-
-        if country == 'DEU':
-            df_ds = ds.to_dataframe(name='Xaver').reset_index()
-            df_ds = df_ds.rename(columns={'Xaver': 'hazard_intensity'})
-        elif country == 'FRA':
-            df_ds = ds.to_dataframe(name='Xynthia').reset_index()
-            df_ds = df_ds.rename(columns={'Xynthia': 'hazard_intensity'})
-        elif country == 'ITA':
-            df_ds = ds.to_dataframe(name='Xaver').reset_index()
-            df_ds = df_ds.rename(columns={'Xaver': 'hazard_intensity'})                
-
-        df_ds = df_ds.loc[(df_ds.hazard_intensity != -9999) & (df_ds.hazard_intensity != 0)].reset_index(drop=True)
-        df_ds['geometry'] = pygeos.points(df_ds.x,y=df_ds.y)
-
-    return df_ds
-
-#         ddata = dd.from_pandas(df_ds, npartitions=32)
-
-#         with ProgressBar():
-#             df_ds['geometry'] = ddata.map_partitions(lambda df_ds: df_ds.apply((lambda row: get_geoms(row)),axis=1),meta=('object')).compute(scheduler='processes') 
-       
-
-def rough_flood_extent(df_ds):
-    """[summary]
-
-    Args:
-        df_ds ([type]): [description]
-
-    Returns:
-        [type]: [description]
-    """
-    return pygeos.envelope(pygeos.multipoints(df_ds['geometry'].values))
-
-
-def load_assets(osm_data_path,asset_type='airports',country='DEU',reproject=True):
-    """[summary]
-
-    Args:
-        asset_type (str, optional): [description]. Defaults to 'airports'.
-        country (str, optional): [description]. Defaults to 'DEU'.
-
-    Returns:
-        [type]: [description]
-    """    
-    # load data
-    assets = pd.read_feather(os.path.join(osm_data_path,'{}_{}.feather'.format(country,asset_type)))
-    assets.geometry = pygeos.from_wkb(assets.geometry.values) #assets.geometry.progress_apply(pygeos.from_wkb)
+    elif hazard_type == 'fluvial_flooding':  ###STIL NEED TO WORK ON THIS PART
+        file_path_lst = os.path.abspath(os.path.join(hazard_data_path, country, 'fluvial_undefended', 'FU_1in{}'.format(rp))) #pathway to file
+        #hazard_country_df = preprocessing_hazard.transform_raster_to_vectorgrid(file_path, hazard_type) 
     
-    # reproject
-    if reproject:
-        if country in ['FRA','DEU']:
-            assets['geometry'] = reproject_assets(assets,current_crs="epsg:4326",approximate_crs ="epsg:3857")
+    else:
+        print("def preprocess_hazard_per_area has not been defined for the following hazard type: {}".format(hazard_type))
+
+
+
+def hazard_preprocessing(local_path):
+    """function to disaggregate hazard data at country level, parallel processing 
+    Args:
+        *local_path*: Local pathway. Defaults to os.path.join('/scistor','ivm','snn490').
+    """
+    # get paths
+    hazard_data_path,fathom_data_path,country_shapefile_path = set_paths(local_path,hazard_preprocessing=True)
+
+    # get settings
+    hazard_dct = set_variables()[0]
+
+    #import hazard data
+    for hazard_type in hazard_dct:
+        #data-preprocessing for coastal floods and earthquakes
+        if hazard_type in ['coastal_flooding', 'earthquakes']:
+            if hazard_type == 'coastal_flooding':
+                file_path_lst = [os.path.abspath(os.path.join(hazard_data_path, hazard_type, 'inuncoast_historical_nosub_hist_rp{:0>4d}_0.tif'.format(rp))) for rp in hazard_dct[hazard_type]] #pathway to file
+            elif hazard_type == 'earthquakes':
+                file_path_lst = [os.path.abspath(os.path.join(hazard_data_path, hazard_type, 'rp_'.format(rp), 'gar17pga{}.tif'.format(rp))) for rp in hazard_dct[hazard_type]] #pathway to file
+
+            #transform to vector data
+            for file_path in file_path_lst:
+                if os.path.isfile('{}'.format(file_path.replace('tif', 'feather'))) == False: #if feather file does not already exists
+                    print('Time to transform global hazard data into polygon format for the following hazard type: {}, rp {}'.format(hazard_type, hazard_dct[hazard_type][file_path_lst.index(file_path)]))
+                    hazard_df = preprocessing_hazard.transform_raster_to_vectorgrid(file_path,hazard_type)
+                    to_geofeather(hazard_df, '{}'.format(file_path.replace('tif', 'feather')), crs="EPSG:4326") #save as geofeather  
+                    print('Global hazard data has been transformed and outputted in polygon format for the following hazard type: {}, rp {}'.format(hazard_type, hazard_dct[hazard_type][file_path_lst.index(file_path)]))
+                else: 
+                    print('Transformed global hazard data in polygon format already exists for the following hazard type: {}, rp {}'.format(hazard_type, hazard_dct[hazard_type][file_path_lst.index(file_path)]))
+
+                # run the extract parallel per country
+                print('Time to start hazard data preprocessing for the following countries: {}'.format(countries))
+                with Pool(cpu_count()-1) as pool: 
+                    pool.starmap(hazard_preprocessing_per_area,zip(countries,
+                                                                    repeat(hazard_dct,len(countries)),
+                                                                    repeat(hazard_data_path,len(countries)),
+                                                                    repeat(country_shapefile_path,len(countries)),
+                                                                    repeat(hazard_type,len(countries)),
+                                                                    repeat(file_path_lst,len(countries)),
+                                                                    repeat(file_path,len(countries))),
+                                                                    chunksize=1)
+    
+        #data preprocessing for fluvial flooding ###STIL NEED TO WORK ON THIS PART
+        elif hazard_type == 'fluvial_flooding':
+            # run the extract parallel per country
+            print('Time to start hazard data preprocessing for the following countries: {}'.format(countries))
+            with Pool(cpu_count()-1) as pool: 
+                pool.starmap(hazard_preprocessing_per_area,zip(countries,
+                                                                repeat(hazard_dct,len(countries)),
+                                                                repeat(fathom_data_path,len(countries)),
+                                                                repeat(hazard_df,len(countries)),
+                                                                repeat(shape_countries,len(countries)),
+                                                                repeat(hazard_type,len(countries)),
+                                                                repeat(file_path_lst,len(countries))),
+                                                                chunksize=1)
+
+################################################################
+        ## Step 2: Damage assessment ##
+################################################################    
+          
+def regional_analysis(country,reg_index,asset_type='roads',hazard='pluvial'):
+    
+    
+    
+    
+def global_hazard_analysis():
+    """function to perform , parallel processing 
+    Args:
+        *local_path*: Local pathway. Defaults to os.path.join('/scistor','ivm','snn490').
+    """
+    
+        if hazard == 'pluvial':
+            haz_short = 'P'
+            hazard_data_path = os.path.join('..','hazard_data','pluvial')
+            return_periods = [5,10,20,50,75,100,200,250,500,1000]
+
+        elif hazard == 'fluvial':
+            haz_short = 'FD'
+            hazard_data_path = os.path.join('..','hazard_data','fluvial_defended')
+            return_periods = [5,10,20,50,75,100,200,250,500,1000]
+
+        elif hazard == 'coastal':
+            haz_short = 'CF'
+            hazard_data_path = os.path.join('..','hazard_data','coastal_flooding')
+            return_periods = #[XX,XX]
+
+        elif hazard == 'earthquake':
+            haz_short = 'EQ'
+            hazard_data_path = os.path.join('..','hazard_data','coastal_flooding')
+            return_periods = #[XX,XX]
+
+        elif hazard == 'tropical_cyclones':
+            haz_short = 'TC'
+            hazard_data_path = os.path.join('..','hazard_data','tropical_cyclones')
+            return_periods = #[XX,XX]           
+
+        elif hazard == 'landslides':
+            haz_short = 'LS'
+            hazard_data_path = os.path.join('..','hazard_data','landslides')
+            return_periods = [1]
+
+
+        #check if file is already finished
+        if hazard in ['pluvial','fluvial','coastal','earthquake','landslide','tropical_cyclones']:
+            if os.path.exists(os.path.join('..','{}_damage'.format(hazard),'{}_{}_{}.csv'.format(country,reg_index,asset_type))):
+                return None
+
+        elif hazard in ['wildfires','temperature']:
+            if os.path.exists(os.path.join('..','{}_exposure'.format(hazard),'{}_{}_{}.csv'.format(country,reg_index,asset_type))):
+                return None  
+    
+    
+    
+    
+
+if __name__ == '__main__':
+    #receive nothing, run area below
+    if (len(sys.argv) == 1):    
+        countries = ['Galveston_Bay']#['Zuid-Holland']
+        run_all(countries)
+    else:
+        # receive ISO code, run one country
+        if (len(sys.argv) > 1) & (len(sys.argv[1]) == 3):    
+            countries = []
+            countries.append(sys.argv[1])
+            run_all(countries)
+        #receive multiple ISO-codes in a list, run specified countries
+        elif '[' in sys.argv[1]:
+            if ']' in sys.argv[1]:
+                countries = sys.argv[1].strip('][').split('.') 
+                run_all(countries)
+            else:
+                print('FAILED: Please write list without space between list-items. Example: [NLD.LUX.BEL]')
+        #receive global, run all countries in the world
+        elif (len(sys.argv) > 1) & (sys.argv[1] == 'global'):    
+            #glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_short.xlsx'))
+            #glob_info = pd.read_excel(os.path.join(r'C:\Users\snn490\surfdrive\Datasets','global_information_test.xlsx'))
+            glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_advanced.xlsx'))
+            countries = list(glob_info.ISO_3digit) 
+            if len(countries) == 0:
+                print('FAILED: Please check file with global information')
+            else:
+                run_all(countries)
+        #receive continent, run all countries in continent
+        elif (len(sys.argv) > 1) & (len(sys.argv[1]) > 3):    
+            #glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_short.xlsx'))
+            #glob_info = pd.read_excel(os.path.join(r'C:\Users\snn490\surfdrive\Datasets','global_information_test.xlsx'))
+            glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_advanced.xlsx'))
+            glob_info = glob_info.loc[glob_info.continent==sys.argv[1]]
+            countries = list(glob_info.ISO_3digit) 
+            if len(countries) == 0:
+                print('FAILED: Please write the continents as follows: Africa, Asia, Central-America, Europe, North-America,Oceania, South-America') 
+            else:
+                run_all(countries)
         else:
-            assets['geometry'] = reproject_assets(assets,current_crs="epsg:4326",approximate_crs ="epsg:5659")
-
-    # make STRtree
-    tree = pygeos.STRtree(assets.geometry.values)
-    
-    return assets,tree
-
-def clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard):
-    """[summary]
-
-    Args:
-        assets ([type]): [description]
-        tree ([type]): [description]
-        convex_hull_hazard ([type]): [description]
-
-    Returns:
-        [type]: [description]
-    """    
-    # clip to hazard area
-    assets = assets.iloc[tree.query(convex_hull_hazard,predicate='intersects')].reset_index(drop=True)
-    
-    return assets
-    
-def buffer_assets(assets,buffer_size=100):
-    """[summary]
-
-    Args:
-        assets ([type]): [description]
-        buffer_size (int, optional): [description]. Defaults to 100.
-
-    Returns:
-        [type]: [description]
-    """    
-    assets['buffered'] = pygeos.buffer(assets.geometry.values,buffer_size)# assets.geometry.progress_apply(lambda x: pygeos.buffer(x,buffer_size)) 
-
-    return assets
-
-def overlay_hazard_assets(df_ds,assets):
-    """[summary]
-
-    Args:
-        df_ds ([type]): [description]
-        assets ([type]): [description]
-
-    Returns:
-        [type]: [description]
-    """
-    #overlay 
-    flooded_tree = pygeos.STRtree(df_ds.geometry.values)
-    if (pygeos.get_type_id(assets.iloc[0].geometry) == 3) | (pygeos.get_type_id(assets.iloc[0].geometry) == 6):
-        return  flooded_tree.query_bulk(assets.geometry,predicate='intersects')    
-    else:
-        return  flooded_tree.query_bulk(assets.buffered,predicate='intersects')
-
-
-def get_depth(row,flood_dict,get_flood_points):
-    """[summary]
-
-    Args:
-        row ([type]): [description]
-        flood_dict ([type]): [description]
-        get_flood_points ([type]): [description]
-
-    Returns:
-        [type]: [description]
-    """    
-    if row.name in flood_dict.keys():
-        return get_flood_points.Xaver.iloc[flood_dict[row.name]]
-    else:
-        return 0
-
-def get_damage_per_asset(asset,df_ds,assets,curves,maxdam,grid_size=90):
-    """[summary]
-
-    Args:
-        asset ([type]): [description]
-        df_ds ([type]): [description]
-        assets ([type]): [description]
-        grid_size (int, optional): [description]. Defaults to 90.
-
-    Returns:
-        [type]: [description]
-    """    
-    get_flood_points = df_ds.iloc[asset[1]['flood_point'].values].reset_index()
-    get_flood_points.geometry= pygeos.buffer(get_flood_points.geometry,radius=grid_size/2,cap_style='square').values
-    get_flood_points = get_flood_points.loc[pygeos.intersects(get_flood_points.geometry.values,assets.iloc[asset[0]].geometry)]
-
-    
-    asset_type = assets.iloc[asset[0]].asset
-    maxdam_asset = maxdam.loc[asset_type].MaxDam
-    
-    water_depths = curves[asset_type].index.values
-    fragility_values = curves[asset_type].values
-    
-    asset_geom = assets.iloc[asset[0]].geometry
-        
-    if len(get_flood_points) == 0:
-        return asset[0],0
-    else:
-        
-        if pygeos.get_type_id(asset_geom) == 1:
-            get_flood_points['overlay_meters'] = pygeos.length(pygeos.intersection(get_flood_points.geometry.values,asset_geom))
-            
-            return asset[0],np.sum((np.interp(get_flood_points.hazard_intensity.values*100,water_depths,fragility_values))*get_flood_points.overlay_meters*maxdam_asset)
-        
-        elif  pygeos.get_type_id(asset_geom) == 3:
-            get_flood_points['overlay_m2'] = pygeos.area(pygeos.intersection(get_flood_points.geometry.values,asset_geom))
-            
-            return asset[0],get_flood_points.apply(lambda x: np.interp(x.hazard_intensity*100, water_depths, fragility_values)*maxdam_asset*x.overlay_m2,axis=1).sum()     
-        
-        else:
-            return asset[0],np.sum((np.interp(get_flood_points.hazard_intensity.values*100,water_depths,fragility_values))*maxdam_asset)     
-
-def load_curves_maxdam(data_path): 
-    """[summary]
-
-    Args:
-        data_path ([type]): [description]
-
-    Returns:
-        [type]: [description]
-    """
-    # load curves and maximum damages as separate inputs
-    curves = pd.read_excel(data_path,sheet_name='flooding_curves',skiprows=8,index_col=[0])
-    maxdam=pd.read_excel(data_path,sheet_name='flooding_curves',index_col=[0]).iloc[:5]
-    
-    curves.columns = maxdam.columns
-
-    #transpose maxdam so its easier work with the dataframe
-    maxdam = maxdam.T
-
-    #interpolate the curves to fill missing values
-    curves = curves.interpolate()
-
-    # fill maxdam damages when value is unknown ### THIS SHOULD BE REMOVED WHEN ALL VALUES ARE KNOWN
-    maxdam.MaxDam = maxdam.MaxDam.fillna(1000)
-    
-    return curves,maxdam
-
-def damage_assessment(asset_type='railways',country='DEU',hazard_type='flood',**kwargs):
-    """[summary]
-
-    Args:
-        asset_type (str, optional): [description]. Defaults to 'railways'.
-        country (str, optional): [description]. Defaults to 'DEU'.
-        hazard_type (str, optional): [description]. Defaults to 'flood'.
-    """
-
-    source_path,osm_data_path,hazard_data_path = paths()
-
-    print('Damage Assessment for {} started in {}'.format(asset_type,country))
-
-    if 'hazard' in kwargs:
-         df_ds = kwargs['hazard']
-    else:
-        # load hazard file
-        if country == 'DEU':
-            hazard_file = os.path.join(hazard_data_path,'events','Xaver.tif')
-        elif country == 'FRA':
-            hazard_file = os.path.join(hazard_data_path,'events','Xynthia.tif')
-        elif country == 'ITA':
-            hazard_file = os.path.join(hazard_data_path,'events','EmiliaRomagna.tif')
-
-        df_ds = load_flood_as_dataframe(hazard_file)
-        print('Hazard data loaded for {} in {}'.format(asset_type,country))
-
-    convex_hull_hazard = rough_flood_extent(df_ds)
-
-    # load curves and maxdam
-    curves,maxdam = load_curves_maxdam(data_path=os.path.join('..','data','infra_vulnerability_data.xlsx'))
-
-    point_assets = ['health','telecom']
-    polygon_assets = ['airports','educational_facilities','waste_solid','waste_water','water_supply']
-    line_assets = ['railways','roads']
-
-    assets,tree = load_assets(osm_data_path,asset_type,country)
-    assets = clip_assets_to_hazard_zone(assets,tree,convex_hull_hazard)
-
-    if (asset_type in line_assets) | (asset_type in point_assets):
-        ### get line assets, clip and buffer them
-        assets = buffer_assets(assets,buffer_size=100)
-    
-    elif asset_type == 'power':
-        power_lines = buffer_assets(assets.loc[assets.asset.isin(['cable','minor_cable','line','minor_line'])],buffer_size=100).reset_index(drop=True)
-        power_poly = assets.loc[assets.asset.isin(['plant','substation'])].reset_index(drop=True)
-        power_points = buffer_assets(assets.loc[assets.asset.isin(['power_tower','power_pole'])],buffer_size=100).reset_index(drop=True)
-
-    print('Asset data loaded for {} in {}'.format(asset_type,country))
-
-    if asset_type != 'power':
-        # get STRtree for flood
-        flood_overlay = pd.DataFrame(overlay_hazard_assets(df_ds,assets).T,columns=['asset','flood_point'])
-
-        ### estimate damage
-        collect_damages = []
-        for asset in tqdm(flood_overlay.groupby('asset'),total=len(flood_overlay.asset.unique()),desc='{} in {} damage calculation'.format(asset_type,country)):
-            collect_damages.append(get_damage_per_asset(asset,df_ds,assets,curves,maxdam))
-
-        damaged_assets = assets.merge(pd.DataFrame(collect_damages,columns=['index','damage']),left_index=True,right_on='index')
-
-        if (asset_type in line_assets) | (asset_type in point_assets):
-            damaged_assets = damaged_assets.drop(['buffered'],axis=1) 
-
-    else:
-        # lines
-        flood_overlay_lines = pd.DataFrame(overlay_hazard_assets(df_ds,power_lines).T,columns=['asset','flood_point'])
-  
-        collect_line_damages = []
-        for asset in tqdm(flood_overlay_lines.groupby('asset'),total=len(flood_overlay_lines.asset.unique()),desc='{} lines in {} damage calculation'.format(asset_type,country)):
-            collect_line_damages.append(get_damage_per_asset(asset,df_ds,power_lines,curves,maxdam))
-
-        damaged_lines = power_lines.merge(pd.DataFrame(collect_line_damages,columns=['index','damage']),left_index=True,right_on='index')
-        damaged_lines = damaged_lines.drop(['buffered'],axis=1) 
-
-        # polygons
-        flood_overlay_poly = pd.DataFrame(overlay_hazard_assets(df_ds,power_poly).T,columns=['asset','flood_point'])
-  
-        collect_poly_damages = []
-        for asset in tqdm(flood_overlay_poly.groupby('asset'),total=len(flood_overlay_poly.asset.unique()),desc='{} poly in {} damage calculation'.format(asset_type,country)):
-            collect_poly_damages.append(get_damage_per_asset(asset,df_ds,power_poly,curves,maxdam))
-        
-        damaged_poly = assets.merge(pd.DataFrame(collect_poly_damages,columns=['index','damage']),left_index=True,right_on='index')
-
-        # points
-        flood_overlay_points = pd.DataFrame(overlay_hazard_assets(df_ds,power_points).T,columns=['asset','flood_point'])
-  
-        collect_point_damages = []
-        for asset in tqdm(flood_overlay_points.groupby('asset'),total=len(flood_overlay_points.asset.unique()),desc='{} point in {} damage calculation'.format(asset_type,country)):
-            collect_point_damages.append(get_damage_per_asset(asset,df_ds,power_points,curves,maxdam))
-        
-        damaged_points = power_points.merge(pd.DataFrame(collect_point_damages,columns=['index','damage']),left_index=True,right_on='index')
-        damaged_points = damaged_points.drop(['buffered'],axis=1) 
-
-        damaged_assets = pd.concat([damaged_lines,damaged_poly,damaged_points]).reset_index(drop=True)
-
-    damaged_assets.to_csv(os.path.join(source_path,'damage_data','{}_{}.csv'.format(asset_type,country)))
-
-    return damaged_assets
-
-def event_assessment(event='Xaver',parallel=True):
-
-    source_path,osm_data_path,hazard_data_path = paths()
-
-    if event == 'Xaver':
-        country = 'DEU'
-        hazard_file = os.path.join(hazard_data_path,'Xaver-NorthernGermany','NorthGermany_MaxWaterDepth_dykes6.5m.tif')
-    elif event == 'Xynthia':
-        country = 'FRA'
-        hazard_file = os.path.join(hazard_data_path,'Xynthia-WesternFrance','WestFrance_depth.tif')
-    elif event == 'EmiliaRomagna':
-        country = 'ITA'
-        hazard_file = os.path.join(hazard_data_path,'EmiliaRomagnaRegion','RER_depth.tif')
-
-    all_assets = ['airports','education_facilities','health','power','railways','roads','telecom','waste_solid','waste_water','water_supply']
-
-    if parallel:
-        with Pool(cpu_count()-2) as pool: 
-            out = pool.map(partial(damage_assessment, country=country), all_assets)
-    else:
-
-        df_ds = load_flood_as_dataframe(hazard_file)
-
-        out = []
-        for asset_type in all_assets:
-            out.append(damage_assessment(asset_type=asset_type,country=country,hazard_type='flood',hazard=df_ds))
-
-    # collect total damage per asset and return that
-    get_total_damages = []
-    for asset in out:
-        get_total_damages.append(pd.DataFrame(asset.groupby(by='asset').sum()['damage']).reset_index())
-
-    df_total_damages = pd.concat(get_total_damages)
-    df_total_damages.to_csv(os.path.join(source_path,'damage_data','total_damage_{}.csv'.format(event)))
-
-    return df_total_damages
-
-if __name__ == "__main__":
-
-    event_damage_per_asset = (event_assessment(event='EmiliaRomagna',parallel=False))
-    print(event_damage_per_asset)
+            print('FAILED: Either provide an ISO3 country name or a continent name')
