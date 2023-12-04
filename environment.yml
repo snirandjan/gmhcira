@@ -1,0 +1,24 @@
+name: py311
+
+channels:
+    - conda-forge
+
+dependencies:
+        - python=3.11
+        - gdal
+        - numpy
+        - geopandas
+        - rasterio
+        - matplotlib
+        - tqdm
+        - pip
+        - jupyterlab
+        - xlrd
+        - pyproj
+        - xarray
+        - rioxarray
+        - openpyxl
+        - pip:
+          # works for regular pip packages
+          - osm-flex
+          - lonboard
