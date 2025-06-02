@@ -1,303 +1,220 @@
 """
+Core code to run the global-scale risk assessment for multiple hazards and infrastructure 
   
-@Author: Sadhana Nirandjan & Elco Koks  - Institute for Environmental studies, VU University Amsterdam
+@Author: Sadhana Nirandjan - Institute for Environmental studies, VU University Amsterdam
 """
 
-################################################################
-                ## Load package and set path ##
-################################################################
 import os,sys
-import pandas as pd
-import numpy as np
 import geopandas as gpd
-import rasterio
-import rioxarray as rxr
-import xarray as xr
-#!pip install geopy
-#!pip install boltons
 from pathlib import Path
-from geofeather.pygeos import to_geofeather, from_geofeather
-from tqdm import tqdm
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from rasterio.plot import show
-from IPython.display import display #when printing geodataframes, put it in columns -> use display(df)
-from matplotlib.ticker import (MultipleLocator, FormatStrFormatter,
-                               AutoMinorLocator, LinearLocator, MaxNLocator)
-from multiprocessing import Pool,cpu_count
-from itertools import repeat
-import pygeos
-from pgpkg import Geopackage
-import matplotlib.pyplot as plt
-import copy
-
-#sys.path.append(os.path.join('..','scripts')) # path to our python scripts
-#sys.path.append("C:\Projects\gmhcira\scripts")
-import functions
-import preprocessing_hazard
-
-plt.rcParams['figure.figsize'] = [20, 20]
-
-from osgeo import gdal
-gdal.SetConfigOption("OSM_CONFIG_FILE", os.path.join("..","osmconf.ini"))
-
-#def run_all(goal_area = 'Netherlands', local_path = 'C:/Users/snn490/surfdrive'):
-def run_all(countries, goal_area = 'Global', local_path = os.path.join('/scistor','ivm','snn490')):
-    """Function to manage and run the model (in parts). 
-    Args:
-        *areas* ([str]): list with areas (e.g. list of countries)
-        *goal_area* (str, optional): area that will be analyzed. Defaults to "Global". 
-        *local_path* ([str], optional): Local pathway. Defaults to os.path.join('/scistor','ivm','snn490').
-    """    
-
-    hazard_preprocessing(local_path)
-    #base_calculations(local_path) 
-    #base_calculations_global(local_path) #if base calcs per area already exist
-    #cisi_calculation(local_path,goal_area)
-
-
+import risk_workflow_countries
+import osm_extract
 
 ################################################################
                     ## set variables ##
 ################################################################
-
+ 
 def set_variables():
     """Function to set the variables that are necessary as input to the model
+
     Returns:
-        hazard_dct (dictionary): overview of hazards and return periods 
+        *cis_dict* (dictionary): overview of overarching infrastructure sub-systems as keys and a list with the associated sub-systems as values 
+        *weight_assets* (dictionary): overview of the weighting of the assets per overarching infrastructure sub-system
+        *weight_groups* (dictionary): overview of the weighting of the groups per overarching infrastructure sub-system
+        *weight_subsystems* (dictionary): overview of the weighting of the sub-systems
     """    
-    #hazard_dct = {'coastal_flooding': [2, 5, 10, 25, 50, 100, 250, 500, 1000], 
-    #              'fluvial_flooding': [5, 10, 20, 50, 75, 100, 200, 250, 500, 1000], 
-    #              'earthquakes': [250, 475, 975, 1500, 2475], 
-    #              'tropical_cyclones': [10, 20 , 50, 100, 200, 1000, 2000, 5000, 10000], 
-    #              'landslides': [None]} #keys are hazards, lists are return periods associated with hazard
+    # Specify which subsystems and associated assets need to be analyzed 
+    cis_dict = {
+        "energy": {"power": ["transmission_line","distribution_line","cable","plant","substation",
+                            "power_tower","power_pole"]},
+        "transportation": {"road":  ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'road', 'track' ], 
+                            "air": ["airport", "runway", "terminal"],
+                            "rail": ["railway"]
+                           },
+        "water": {"water_supply": ["water_tower", "water_well", "reservoir_covered",
+                                    "water_treatment_plant", "water_storage_tank"]},
+        "waste": {"waste_solid": ["waste_transfer_station"],
+                "waste_water": ["wastewater_treatment_plant"]},
+        "telecommunication": {"telecom": ["communication_tower", "mast"]},
+        "healthcare": {"healthcare": ["clinic", "doctors", "hospital", "dentist", "pharmacy", 
+                            "physiotherapist", "alternative", "laboratory", "optometrist", "rehabilitation", 
+                            "blood_donation", "birthing_center"]},
+        "education": {"education": ["college", "kindergarten", "library", "school", "university"]}
+        }
 
-    hazard_dct = {'coastal_flooding': [2, 5, 10, 25, 50, 100, 250, 500, 1000]} #keys are hazards, lists are return periods associated with hazard
+    # natural hazard that needs to be analyzed
+    hazard_types = ['pluvial'] #['fluvial', 'coastal', 'landslide_eq', 'landslide_rf', 'earthquake'] 
 
-    return [hazard_dct]
+    # input specifications 
+    eq_data = 'GIRI' #GIRI, GEM or GAR data
+    flood_data = {'version': 'Fathom_v3', # options: 'Fathom_v2' or 'Fathom_v3' 
+                    'year': 2020, # options: None (for Fathom_v2), '2020', '2030', '2050', '2080' (for Fathom_v3)
+                    'scenario': None} #None (for Fathom_v2 and v3), 'SSP1_2.6', 'SSP2_4.5', 'SSP3_7.0', 'SSP5_8.5' (for Fathom_v3)
+    landslide_rf_data = {'scenario': None} #None for current situation, 'SSP126', 'SSP585' 
+    
+    #Vuln. settings
+    database_id_curves=True # True if curve ids are specified in an external file 
+    database_maxdam=False # True if max dams are specified in an external file
+    vuln_settings = [database_id_curves, database_maxdam]
+
+    #overwrite existing files?
+    overwrite = True 
+
+    return [cis_dict, hazard_types, eq_data, flood_data, landslide_rf_data, vuln_settings, overwrite]
+
+
+################################################################
+                    ## Set pathways ##
+################################################################
+def set_paths():
+    """
+    Defines and returns a dictionary of standardized file paths required for risk assessment.
+
+    This function sets the base, data, and project directories, including locations for 
+    various hazard datasets (flood, earthquake, landslide, cyclone) and output storage. 
+    The paths are hardcoded for a specific file system structure and used throughout 
+    the risk assessment workflow to load inputs and save results.
+
+    Returns:
+        dict: A dictionary (`pathway_dict`) containing the following paths:
+            - data_path: Path to general data resources (e.g., vulnerability, GADM, global info).
+            - flood_data_path: Path to flood hazard data (Fathom).
+            - eq_data_path: Path to earthquake hazard data (GIRI).
+            - landslide_data_path: Path to landslide hazard and rainfall data.
+            - cyclone_data_path: Path to tropical cyclone hazard data.
+            - output_path: Path to the output directory for storing assessment results.
+
+    Note:
+        This function assumes a specific directory structure based on the user's environment 
+        and may need to be adjusted for other systems.
+    """
+    
+    # define your pathways
+    base_path = Path('/home/snirandjan/')
+    data_path = Path('/home/snirandjan/Projects/gmhcira/data') 
+    project_space_path = Path('/projects/0/prjs1486/datasets')
+
+    flood_data_path = project_space_path / 'fathomv3' # Flood data
+    eq_data_path = project_space_path / 'data_catalogue' / 'open_street_map' / 'global_hazards' / 'earthquakes' / 'GIRI' # Earthquake data
+    landslide_data_path = project_space_path / 'data_catalogue' / 'open_street_map' / 'global_hazards' / 'landslides' # Landslide data, should also contain a folder rainfall with the global normalized rainfall data
+    cyclone_data_path = project_space_path / 'data_catalogue' / 'open_street_map' / 'global_hazards' / 'tropical_cyclones' # Cyclone data
+    output_path = base_path / 'Outputs' / 'gmhcira' # Will contain the outputs
+
+    pathway_dict = risk_workflow_countries.create_pathway_dict(data_path, flood_data_path, eq_data_path, landslide_data_path, cyclone_data_path, output_path)
+
+    return pathway_dict
+
 
 ################################################################
                     ## Set pathways ##
 ################################################################
 
-def set_paths(local_path = 'C:/Data/CISI',hazard_preprocessing=False):
-    """Function to specify required pathways for inputs and outputs
-    Args:
-        *local_path* (str, optional): local path. Defaults to 'C:/Data/CISI'.
-        *hazard_preprocessing* (bool, optional): True if hazard preprocessing part of model should be activated. Defaults to False.
-    Returns:
-        *hazard_data_path* (str): directory to coastal flood, landslide, earthquake and cyclone hazard data
-        *fathom_data_path* (str): directory to fathom hazard data
-        *country_shapefile_path* (str): directory to file with country boundaries
-    """ 
-    # Set path to inputdata
-    hazard_data_path = os.path.abspath(os.path.join('/scistor','ivm','data_catalogue','open_street_map','global_hazards'))
-    fathom_data_path = os.path.abspath(os.path.join('/scistor','ivm','eks510','fathom-global'))
-
-    shapes_file = 'global_countries_advanced.geofeather'
-    country_shapefile_path = os.path.abspath(os.path.join(local_path, 'Datasets', 'Administrative_boundaries', 'global_countries_buffer', shapes_file))
-
-    if hazard_preprocessing:
-        return [hazard_data_path,fathom_data_path,country_shapefile_path]
-
-################################################################
- ## Step 1: hazard_preprocessing  ##
-################################################################    
-
-def hazard_preprocessing_per_area(country,hazard_dct,hazard_data_path,country_shapefile_path,hazard_type,file_path_lst,file_path):
-    """function to extract infrastrastructure for an area 
-    Args:
-        *area* (str): area to be analyzed
-        *osm_data_path* (str): directory to osm data
-        *fetched_infra_path* (str): directory to output location of the extracted infrastructure data 
-        *country_shapes_path* (str): directory to dataset with administrative boundaries (e.g. of countries)
+def run_risk_assessment(areas):
     """
-    shape_countries = from_geofeather(country_shapefile_path) #open as geofeather
-    hazard_df = from_geofeather(file_path.replace('tif', 'feather')) #open as geofeather
-    rp = str(hazard_dct[hazard_type][file_path_lst.index(file_path)]) #get return period using index
+    Runs a country-level risk assessment workflow for the specified ISO3 country codes.
 
-    if hazard_type in ['coastal_flooding', 'earthquakes']:
-        if os.path.isfile(os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp), '{}_rp{}_{}.feather'.format(hazard_type, rp, country))) == False: #if feather file does not already exists 
-            #soft overlay of hazard data with countries
-            country_shape = shape_countries[shape_countries['ISO_3digit'] == country]
-            if country_shape.empty == False: #if ISO_3digit in shape_countries
-                print("Time to overlay and output '{}' hazard data for the following country: {}".format(hazard_type, country))
-                spat_tree = pygeos.STRtree(hazard_df.geometry)
-                hazard_country_df = (hazard_df.loc[spat_tree.query(country_shape.geometry.iloc[0],predicate='intersects').tolist()]).sort_index(ascending=True) #get grids that overlap with country
-                hazard_country_df = hazard_country_df.reset_index() #.rename(columns = {'index':'grid_number'}) #get index as column and name column grid_number
+    This function manages the execution of risk assessments for one or more countries
+    by calling the appropriate processing function (`damage_calculation` or 
+    `damage_calculation_admin2`) based on the country. It loads necessary paths 
+    and configuration settings, then loops through each country code provided 
+    and performs the assessment in sequence.
 
-                #save data
-                Path(os.path.abspath(os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp)))).mkdir(parents=True, exist_ok=True) 
-                to_geofeather(hazard_country_df, os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp), '{}_rp{}_{}.feather'.format(hazard_type, rp, country)), crs="EPSG:4326") #save as geofeather #save file for each country
-                #to_geofeather(hazard_country_df, os.path.join(hazard_data_path, hazard_type, rp, '{}_{}_{}.feather'.format(hazard_type, rp, country)), crs="EPSG:4326") #save as geofeather #save file for each country
-                temp_df = functions.transform_to_gpd(hazard_country_df) #transform df to gpd with shapely geometries
-                temp_df.to_file(os.path.join(hazard_data_path, hazard_type, 'rp_{}'.format(rp), '{}_rp{}_{}.gpkg'.format(hazard_type, rp, country)), layer=' ', driver="GPKG")              
-            else:
-                print("Country '{}' not specified in file containing shapefiles of countries with ISO_3digit codes. Please check inconsistency".format(country))
-        else:
-            print('Hazard data already exists at country level, file: {}_rp{}_{}'.format(hazard_type,rp,country))
-
-    elif hazard_type == 'fluvial_flooding':  ###STIL NEED TO WORK ON THIS PART
-        file_path_lst = os.path.abspath(os.path.join(hazard_data_path, country, 'fluvial_undefended', 'FU_1in{}'.format(rp))) #pathway to file
-        #hazard_country_df = preprocessing_hazard.transform_raster_to_vectorgrid(file_path, hazard_type) 
-    
-    else:
-        print("def preprocess_hazard_per_area has not been defined for the following hazard type: {}".format(hazard_type))
-
-
-
-def hazard_preprocessing(local_path):
-    """function to disaggregate hazard data at country level, parallel processing 
     Args:
-        *local_path*: Local pathway. Defaults to os.path.join('/scistor','ivm','snn490').
+        areas (list of str): List of ISO3 country codes (e.g., ['NLD', 'ETH', 'CHN']) 
+            for which the risk assessment should be run.
+
+    Notes:
+        - Certain countries (e.g., 'NGA', 'NER', 'USA') use an alternative admin2-level
+          processing method.
+        - All required paths and input data are initialized internally via helper 
+          functions (`set_paths` and `set_variables`).
+        - Errors encountered during the processing of a country are caught and printed 
+          to allow the remaining countries to continue processing.
     """
+
     # get paths
-    hazard_data_path,fathom_data_path,country_shapefile_path = set_paths(local_path,hazard_preprocessing=True)
+    pathway_dict = set_paths()
 
     # get settings
-    hazard_dct = set_variables()[0]
+    cis_dict, hazard_types, eq_data, flood_data, landslide_rf_data, vuln_settings, overwrite = set_variables()[0:7]
 
-    #import hazard data
-    for hazard_type in hazard_dct:
-        #data-preprocessing for coastal floods and earthquakes
-        if hazard_type in ['coastal_flooding', 'earthquakes']:
-            if hazard_type == 'coastal_flooding':
-                file_path_lst = [os.path.abspath(os.path.join(hazard_data_path, hazard_type, 'inuncoast_historical_nosub_hist_rp{:0>4d}_0.tif'.format(rp))) for rp in hazard_dct[hazard_type]] #pathway to file
-            elif hazard_type == 'earthquakes':
-                file_path_lst = [os.path.abspath(os.path.join(hazard_data_path, hazard_type, 'rp_'.format(rp), 'gar17pga{}.tif'.format(rp))) for rp in hazard_dct[hazard_type]] #pathway to file
+    #Uncomment if you would like to extract the data relevant infrastructure data first
+    # for area in areas:
+    #     osm_extract.asset_extraction(area,
+    #                                             pathway_dict,
+    #                                             cis_dict,
+    #                                             overwrite)
 
-            #transform to vector data
-            for file_path in file_path_lst:
-                if os.path.isfile('{}'.format(file_path.replace('tif', 'feather'))) == False: #if feather file does not already exists
-                    print('Time to transform global hazard data into polygon format for the following hazard type: {}, rp {}'.format(hazard_type, hazard_dct[hazard_type][file_path_lst.index(file_path)]))
-                    hazard_df = preprocessing_hazard.transform_raster_to_vectorgrid(file_path,hazard_type)
-                    to_geofeather(hazard_df, '{}'.format(file_path.replace('tif', 'feather')), crs="EPSG:4326") #save as geofeather  
-                    print('Global hazard data has been transformed and outputted in polygon format for the following hazard type: {}, rp {}'.format(hazard_type, hazard_dct[hazard_type][file_path_lst.index(file_path)]))
-                else: 
-                    print('Transformed global hazard data in polygon format already exists for the following hazard type: {}, rp {}'.format(hazard_type, hazard_dct[hazard_type][file_path_lst.index(file_path)]))
-
-                # run the extract parallel per country
-                print('Time to start hazard data preprocessing for the following countries: {}'.format(countries))
-                with Pool(cpu_count()-1) as pool: 
-                    pool.starmap(hazard_preprocessing_per_area,zip(countries,
-                                                                    repeat(hazard_dct,len(countries)),
-                                                                    repeat(hazard_data_path,len(countries)),
-                                                                    repeat(country_shapefile_path,len(countries)),
-                                                                    repeat(hazard_type,len(countries)),
-                                                                    repeat(file_path_lst,len(countries)),
-                                                                    repeat(file_path,len(countries))),
-                                                                    chunksize=1)
-    
-        #data preprocessing for fluvial flooding ###STIL NEED TO WORK ON THIS PART
-        elif hazard_type == 'fluvial_flooding':
-            # run the extract parallel per country
-            print('Time to start hazard data preprocessing for the following countries: {}'.format(countries))
-            with Pool(cpu_count()-1) as pool: 
-                pool.starmap(hazard_preprocessing_per_area,zip(countries,
-                                                                repeat(hazard_dct,len(countries)),
-                                                                repeat(fathom_data_path,len(countries)),
-                                                                repeat(hazard_df,len(countries)),
-                                                                repeat(shape_countries,len(countries)),
-                                                                repeat(hazard_type,len(countries)),
-                                                                repeat(file_path_lst,len(countries))),
-                                                                chunksize=1)
-
-################################################################
-        ## Step 2: Damage assessment ##
-################################################################    
-          
-def regional_analysis(country,reg_index,asset_type='roads',hazard='pluvial'):
-    
-    
-    
-    
-def global_hazard_analysis():
-    """function to perform , parallel processing 
-    Args:
-        *local_path*: Local pathway. Defaults to os.path.join('/scistor','ivm','snn490').
-    """
-    
-        if hazard == 'pluvial':
-            haz_short = 'P'
-            hazard_data_path = os.path.join('..','hazard_data','pluvial')
-            return_periods = [5,10,20,50,75,100,200,250,500,1000]
-
-        elif hazard == 'fluvial':
-            haz_short = 'FD'
-            hazard_data_path = os.path.join('..','hazard_data','fluvial_defended')
-            return_periods = [5,10,20,50,75,100,200,250,500,1000]
-
-        elif hazard == 'coastal':
-            haz_short = 'CF'
-            hazard_data_path = os.path.join('..','hazard_data','coastal_flooding')
-            return_periods = #[XX,XX]
-
-        elif hazard == 'earthquake':
-            haz_short = 'EQ'
-            hazard_data_path = os.path.join('..','hazard_data','coastal_flooding')
-            return_periods = #[XX,XX]
-
-        elif hazard == 'tropical_cyclones':
-            haz_short = 'TC'
-            hazard_data_path = os.path.join('..','hazard_data','tropical_cyclones')
-            return_periods = #[XX,XX]           
-
-        elif hazard == 'landslides':
-            haz_short = 'LS'
-            hazard_data_path = os.path.join('..','hazard_data','landslides')
-            return_periods = [1]
-
-
-        #check if file is already finished
-        if hazard in ['pluvial','fluvial','coastal','earthquake','landslide','tropical_cyclones']:
-            if os.path.exists(os.path.join('..','{}_damage'.format(hazard),'{}_{}_{}.csv'.format(country,reg_index,asset_type))):
-                return None
-
-        elif hazard in ['wildfires','temperature']:
-            if os.path.exists(os.path.join('..','{}_exposure'.format(hazard),'{}_{}_{}.csv'.format(country,reg_index,asset_type))):
-                return None  
-    
-    
-    
-    
-
+    for area in areas:
+        try:   
+            if area not in ['NGA', 'NER', 'UZB', 'ETH', 'ZMB', 'LBY', 'AFG', 'CHL', 'FJI', 'KIR', 'AUS', 'BRA', 'CAN', 'CHN', 'IDN', 'KAZ', 'RUS', 'USA']: 
+                risk_workflow_countries.damage_calculation(area,
+                                                        pathway_dict,
+                                                        cis_dict,
+                                                        hazard_types,
+                                                        eq_data,
+                                                        flood_data,
+                                                        landslide_rf_data,
+                                                        vuln_settings,
+                                                        overwrite)
+            else:
+                risk_workflow_countries.damage_calculation_admin2(area,
+                                                        pathway_dict,
+                                                        cis_dict,
+                                                        hazard_types,
+                                                        eq_data,
+                                                        flood_data,
+                                                        landslide_rf_data,
+                                                        vuln_settings,
+                                                        overwrite)
+        except Exception as error:
+            print(f"An error occurred for {area}:", error) # An error occurred: name 'x' is not defined
+        
 if __name__ == '__main__':
-    #receive nothing, run area below
-    if (len(sys.argv) == 1):    
-        countries = ['Galveston_Bay']#['Zuid-Holland']
-        run_all(countries)
-    else:
-        # receive ISO code, run one country
-        if (len(sys.argv) > 1) & (len(sys.argv[1]) == 3):    
-            countries = []
-            countries.append(sys.argv[1])
-            run_all(countries)
-        #receive multiple ISO-codes in a list, run specified countries
-        elif '[' in sys.argv[1]:
-            if ']' in sys.argv[1]:
-                countries = sys.argv[1].strip('][').split('.') 
-                run_all(countries)
-            else:
-                print('FAILED: Please write list without space between list-items. Example: [NLD.LUX.BEL]')
-        #receive global, run all countries in the world
-        elif (len(sys.argv) > 1) & (sys.argv[1] == 'global'):    
-            #glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_short.xlsx'))
-            #glob_info = pd.read_excel(os.path.join(r'C:\Users\snn490\surfdrive\Datasets','global_information_test.xlsx'))
-            glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_advanced.xlsx'))
-            countries = list(glob_info.ISO_3digit) 
-            if len(countries) == 0:
-                print('FAILED: Please check file with global information')
-            else:
-                run_all(countries)
-        #receive continent, run all countries in continent
-        elif (len(sys.argv) > 1) & (len(sys.argv[1]) > 3):    
-            #glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_short.xlsx'))
-            #glob_info = pd.read_excel(os.path.join(r'C:\Users\snn490\surfdrive\Datasets','global_information_test.xlsx'))
-            glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_advanced.xlsx'))
-            glob_info = glob_info.loc[glob_info.continent==sys.argv[1]]
-            countries = list(glob_info.ISO_3digit) 
-            if len(countries) == 0:
-                print('FAILED: Please write the continents as follows: Africa, Asia, Central-America, Europe, North-America,Oceania, South-America') 
-            else:
-                run_all(countries)
+    # receive ISO code, run one country
+    if (len(sys.argv) > 1) & (len(sys.argv[1]) == 3):    
+        areas = []
+        areas.append(sys.argv[1])
+        run_risk_assessment(areas)
+    #receive multiple ISO-codes in a list, run specified countries
+    elif '[' in sys.argv[1]:
+        if ']' in sys.argv[1]:
+            areas = sys.argv[1].strip('][').split('.') 
+            run_risk_assessment(areas)
         else:
-            print('FAILED: Either provide an ISO3 country name or a continent name')
+            print('FAILED: Please write list without space between list-items. Example: [NLD.LUX.BEL]')
+    #receive global, run all countries in the world
+    elif (len(sys.argv) > 1) & (sys.argv[1] == 'global'):    
+        #glob_info = pd.read_excel(os.path.join('/scistor','ivm','snn490','Datasets','global_information_advanced.xlsx'))
+        glob_info = gpd.read_parquet(Path('/home/snirandjan/Projects/gmhcira/data')/ 'gadm' / 'gadm_410_simplified_admin0_income') 
+        glob_info = glob_info.sort_values(by='area_km2', ascending=True)
+        areas = list(glob_info.GID_0)
+        if len(areas) == 0:
+            print('FAILED: Please check file with global information')
+        else:
+            print(areas)
+            run_risk_assessment(areas)
+    #receive income class, run all countries in income class
+    elif (len(sys.argv) > 1) & (len(sys.argv[1]) > 3):    
+        glob_info = gpd.read_parquet(Path('/home/snirandjan/Projects/gmhcira/data') / 'gadm' / 'gadm_410_simplified_admin0_income') 
+        glob_info = glob_info.loc[glob_info['Income group']==sys.argv[1]]
+        glob_info = glob_info.sort_values(by='area_km2', ascending=True)
+        areas = list(glob_info.GID_0) 
+
+        #uncomment if you would like to run code from certain country
+        # if 'SYR' in areas: #low income
+        #     areas = areas[areas.index('SYR'):]
+        # elif 'BGD' in areas: #lower middle income
+        #     areas = areas[areas.index('BGD'):]
+        # elif 'ECU' in areas: #upper middle income SLV
+        #     areas = areas[areas.index('ECU'):]
+        # elif 'DNK' in areas: # high income SHN
+        #     areas = areas[areas.index('DNK'):]
+
+        if len(areas) == 0:
+            print('FAILED: Please write the continents as follows: Low income, Lower middle income, Upper middle income, High income') 
+        else:
+            print(areas)
+            run_risk_assessment(areas)
+    else:
+        print('FAILED: Either provide an ISO3 country name or a income group')
