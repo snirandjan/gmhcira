@@ -1,7 +1,7 @@
-# Global multi-hazard critical infrastructure risk analysis
+# Global multiple hazard critical infrastructure risk analysis
 
 
-Python implementation of global multi-hazard critical infrastructure risk analysis
+Python implementation of global multiple hazard critical infrastructure risk analysis
 
 
 **Requirements:** [NumPy](http://www.numpy.org/), [pandas](https://pandas.pydata.org/), [geopandas](http://geopandas.org/), [matplotlib](https://matplotlib.org/)
