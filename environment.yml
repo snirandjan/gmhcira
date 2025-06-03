@@ -1,24 +1,27 @@
 name: py311
 
 channels:
-    - conda-forge
+  - conda-forge
 
 dependencies:
-        - python=3.11
-        - gdal
-        - numpy
-        - geopandas
-        - rasterio
-        - matplotlib
-        - tqdm
-        - pip
-        - jupyterlab
-        - xlrd
-        - pyproj
-        - xarray
-        - rioxarray
-        - openpyxl
-        - pip:
-          # works for regular pip packages
-          - osm-flex
-          - lonboard
+  - python=3.11
+  - geopandas
+  - pandas
+  - numpy
+  - shapely
+  - rasterio
+  - xarray
+  - rioxarray
+  - gdal
+  - pyproj
+  - matplotlib
+  - tqdm
+  - joblib
+  - fiona
+  - openpyxl
+  - xlrd
+  - jupyterlab
+  - pip
+  - pip:
+      - osm-flex  
+
