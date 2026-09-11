@@ -22,13 +22,13 @@ conda config --add channels conda-forge
 conda env create -f environment.yml
 conda activate py311
 ```
-**Requirements:** [NumPy](http://www.numpy.org/), [pandas](https://pandas.pydata.org/), [geopandas](http:
-//geopandas.org/), [matplotlib](https://matplotlib.org/)
+**Requirements:** [NumPy](http://www.numpy.org/), [pandas](https://pandas.pydata.org/), [geopandas](http://geopandas.org/), [matplotlib](https://matplotlib.org/)
 
 ## How to cite
 If you use GMHCITRA in your work, please cite the corresponding paper:
 
 Nirandjan, S., Verschuur, J., Wing, O.E.J., de Moel, H., Ward, P.J. Aerts, J.C.J.H. & Koks, E.E. A global-scale assessment of the multiple-hazard risk to critical infrastructure. Manuscript under review at _Environmental Research Letters_.
+
 
   @article{Nirandjan_GMHCITRA,
     title={A global-scale assessment of the multiple-hazard risk to critical infrastructure},
@@ -37,9 +37,10 @@ Nirandjan, S., Verschuur, J., Wing, O.E.J., de Moel, H., Ward, P.J. Aerts, J.C.J
     note={Manuscript under review},
     year={2026}
   }
+
       
 The following DOI can be cited for this repository:
-[![DOI]()
+[]
 
 ### License
 Copyright (C) 2026 Sadhana Nirandjan & Elco Koks. All versions released under the [MIT license](LICENSE).
