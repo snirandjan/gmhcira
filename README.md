@@ -30,7 +30,15 @@ If you use GMHCITRA in your work, please cite the corresponding paper:
 Nirandjan, S., Verschuur, J., Wing, O.E.J., de Moel, H., Ward, P.J. Aerts, J.C.J.H. & Koks, E.E. A global-scale assessment of the multiple-hazard risk to critical infrastructure. Manuscript under review at _Environmental Research Letters_.
 
 
-  @article{Nirandjan_GMHCITRA, title={A global-scale assessment of the multiple-hazard risk to critical infrastructure}, author={Nirandjan, S. and Verschuur, J. and Wing, O.E.J. and de Moel, H. and Ward, P.J. and Aerts, J.C.J.H. and Koks, E.E.}, journal={Environmental Research Letters}, note={Manuscript under review}, year={2026} }
+    @article{Nirandjan2022_CISI,
+      title={A spatially-explicit harmonized global dataset of critical infrastructure},
+      author={Nirandjan, S., Koks, E.E., Ward, P.J. and Aerts, J.C.J.H.},
+      journal={Scientific Data},
+      volume={9},
+      number={150},
+      pages={13},
+      year={2022}
+    }
 
       
 The following DOI can be cited for this repository:
