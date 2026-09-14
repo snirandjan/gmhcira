@@ -1,4 +1,4 @@
-# Global multiple hazard critical infrastructure risk analysis (GMHCIRA)
+# Global Multiple-Hazard Critical Infrastructure Risk Analysis (GMHCIRA)
 Python implementation of the Global Multiple-Hazard Critical Infrastructure Risk Analysis (GMHCIRA). This repository provides the code to:
 - extract critical infrastructure assets from OpenStreetMap (OSM) data;
 - calculate damages per return period for each hazard;
