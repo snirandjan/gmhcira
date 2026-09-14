@@ -55,4 +55,4 @@ The following DOI can be cited for this repository:
 []
 
 ### License
-Copyright (C) 2026 Sadhana Nirandjan & Elco Koks. All versions released under the [MIT license](LICENSE).
+Copyright (C) 2026 Sadhana Nirandjan. All versions released under the [MIT license](LICENSE).
