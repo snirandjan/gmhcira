@@ -51,8 +51,7 @@ Nirandjan, S., Verschuur, J., Wing, O.E.J., de Moel, H., Ward, P.J. Aerts, J.C.J
     }
 
       
-The following DOI can be cited for this repository:
-[]
+The following DOI can be cited for this repository: [![DOI](https://doi.org/10.5281/zenodo.22745815.svg)](https://doi.org/10.5281/zenodo.22745815)
 
 ### License
 Copyright (C) 2026 Sadhana Nirandjan. All versions released under the [MIT license](LICENSE).
